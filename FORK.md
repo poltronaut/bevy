@@ -14,7 +14,6 @@ this page is its `FORK.md`.
 | `main` | the upstream release we build on (today `v0.19.1`) plus our patches | merges only: `patch/*` and `sync/*` PRs |
 | `upstream-main` | `bevyengine/bevy` `main`, fast-forward only | `tools/bevy_fork.sh mirror --push` |
 | `patch/<topic>` | one change of ours, cut from the release `main` is on | whoever writes the patch |
-| `pr/<topic>` | the same change on `upstream-main`, offered upstream | when it could go upstream |
 | `sync/<tag>` | an upstream release merged into `main` | `tools/bevy_fork.sh sync <tag>` |
 
 ```
@@ -22,8 +21,9 @@ bevyengine/bevy main ──► upstream-main                 (fast-forward mirro
 bevyengine/bevy v0.19.1 ─┐
                          ├─► main                       (release + our patches, merges only)
 patch/<topic> ───────────┘
-patch/<topic> ───────────► pr/<topic> on upstream-main   (offered upstream)
 ```
+
+Nothing flows back to `bevyengine/bevy`: see "Nothing goes upstream" below.
 
 Why `main` is a release and not upstream `main`: upstream `main` is the next
 version in development (`0.20.0-dev` on 2026-10-08), while avian3d, bevy-tnua
@@ -73,9 +73,7 @@ tools/bevy_fork.sh sync v0.20.0 --upgrade
 Resolve our patches against the new release on `sync/v0.20.0`, then switch
 the workspace's `bevy` version, the `[patch.crates-io]` block
 (`tools/bevy_fork.sh cargo-patch`) and every Bevy crate we depend on in the
-same matter-engine PR. That merge is also the cheapest moment to bring each
-`pr/<topic>` up to date and offer it upstream. Every patch upstream takes is
-one we stop carrying.
+same matter-engine PR.
 
 ## Writing a patch
 
@@ -84,9 +82,8 @@ tools/bevy_fork.sh patch retained-shadows
 git -C ../bevy worktree add ../bevy-retained-shadows patch/retained-shadows
 ```
 
-- Keep a patch small and on its own branch. Write it the way upstream would
-  take it (their code style, tests, no matter-engine names), so it can go
-  upstream as `pr/<topic>`.
+- Keep a patch small and on its own branch, in Bevy's code style with its
+  own tests and no matter-engine names, so later upstream merges stay easy.
 - Merge it into `main` with `--no-ff` by PR. The PR names the matter-engine
   spec that needs it.
 - Our patches are public (the fork is public) and under Bevy's MIT /
@@ -105,6 +102,32 @@ bevy_pbr = { path = "../bevy-retained-shadows/crates/bevy_pbr" }
 
 Remove it before committing. `Cargo.lock` must keep pointing at the git
 revision.
+
+## Nothing goes upstream
+
+No pull request, issue, comment or push goes to `bevyengine/*` from these
+sessions, and no branch is prepared for it. Contributing to Bevy is the
+owner's own decision, made and done separately (owner, 2026-10-08;
+matter-engine spec 065 D8). Three guards hold it:
+
+- `upstream` has no push URL: `git push upstream` fails. Check with
+  `git -C ../bevy remote -v`.
+- `gh`'s default repo in `../bevy` is `poltronaut/bevy`. Still pass
+  `--repo poltronaut/bevy` on every `gh` write.
+- The `guard_bevy_upstream.py` hook (matter-engine
+  `.claude/hooks/`, also installed in `~/.claude/hooks/` on the
+  workstation) blocks any `gh` or `git` write aimed at bevyengine, and any
+  `gh` write in a Bevy checkout without `--repo poltronaut/...`.
+
+A fresh clone of the fork needs the first two again:
+
+```bash
+git -C ../bevy remote add upstream https://github.com/bevyengine/bevy.git
+git -C ../bevy remote set-url --push upstream "DISABLED: never push to bevyengine/bevy (owner decision, spec 065 D8)"
+cd ../bevy && gh repo set-default poltronaut/bevy
+```
+
+`tools/bevy_fork.sh` sets them on every run.
 
 ## The workspace side
 
