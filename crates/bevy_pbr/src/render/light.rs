@@ -1363,6 +1363,7 @@ pub fn prepare_lights(
         maybe_layers,
         _no_indirect_drawing,
         _maybe_ambient_override,
+        _resolution_override,
     ) in sorted_cameras
         .0
         .iter()
