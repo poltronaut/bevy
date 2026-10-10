@@ -16,7 +16,7 @@
 
 #define_import_path bevy_pbr::raymarch
 
-#import bevy_pbr::mesh_view_bindings::depth_prepass_texture
+#import bevy_pbr::mesh_view_bindings::{depth_prepass_texture, view}
 #import bevy_pbr::view_transformations::{
     direction_world_to_clip,
     ndc_to_uv,
@@ -63,19 +63,26 @@ fn depth_sample_bilinear_clamped(uv: vec2<f32>, tex_size: vec2<f32>) -> f32 {
 }
 #endif
 
+// The march's uvs span the main pass's region; the textures are full size
+// (poltronaut: matter-engine spec 064 D2, a main pass with a resolution
+// override renders into the top-left part).
+fn main_pass_uv(uv: vec2<f32>) -> vec2<f32> {
+    return uv * view.main_pass_viewport.zw / vec2<f32>(textureDimensions(depth_prepass_texture));
+}
+
 fn depth_sample_linear(uv: vec2<f32>, tex_size: vec2<f32>) -> f32 {
 #ifdef USE_DEPTH_SAMPLERS
-    return textureSampleLevel(depth_prepass_texture, depth_linear_sampler, uv, 0u);
+    return textureSampleLevel(depth_prepass_texture, depth_linear_sampler, main_pass_uv(uv), 0u);
 #else
-    return depth_sample_bilinear_clamped(uv, tex_size);
+    return depth_sample_bilinear_clamped(main_pass_uv(uv), tex_size);
 #endif
 }
 
 fn depth_sample_nearest(uv: vec2<f32>, tex_size: vec2<f32>) -> f32 {
 #ifdef USE_DEPTH_SAMPLERS
-    return textureSampleLevel(depth_prepass_texture, depth_nearest_sampler, uv, 0u);
+    return textureSampleLevel(depth_prepass_texture, depth_nearest_sampler, main_pass_uv(uv), 0u);
 #else
-    return depth_sample_nearest_clamped(uv, tex_size);
+    return depth_sample_nearest_clamped(main_pass_uv(uv), tex_size);
 #endif
 }
 

@@ -115,7 +115,7 @@ fn evaluate_ssr(R_world: vec3<f32>, P_world: vec3<f32>, jitter: f32) -> vec4<f32
     let raymarch_result = depth_ray_march_march(&raymarch);
     if (raymarch_result.hit) {
         return vec4(
-            textureSampleLevel(color_texture, color_sampler, raymarch_result.hit_uv, 0.0).rgb,
+            textureSampleLevel(color_texture, color_sampler, raymarch_result.hit_uv * view.main_pass_viewport.zw / view.viewport.zw, 0.0).rgb,
             0.0
         );
     }

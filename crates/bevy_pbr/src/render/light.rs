@@ -8,7 +8,7 @@ use bevy_camera::visibility::{
     CascadesVisibleEntities, CubemapVisibleEntities, RenderLayers, ViewVisibility,
     VisibleMeshEntities,
 };
-use bevy_camera::{Camera, Camera3d, RenderTarget, ShadowLodOrigin};
+use bevy_camera::{Camera, Camera3d, MainPassResolutionOverride, RenderTarget, ShadowLodOrigin};
 use bevy_color::ColorToComponents;
 use bevy_core_pipeline::core_3d::CORE_3D_DEPTH_FORMAT;
 use bevy_core_pipeline::schedule::RootNonCameraView;
@@ -1019,6 +1019,7 @@ pub fn prepare_lights(
             Option<&RenderLayers>,
             Has<NoIndirectDrawing>,
             Option<&AmbientLight>,
+            Option<&MainPassResolutionOverride>,
         ),
         With<Camera3d>,
     >,
@@ -1638,6 +1639,7 @@ pub fn prepare_lights(
         maybe_layers,
         no_indirect_drawing,
         maybe_ambient_override,
+        resolution_override,
     ) in sorted_cameras
         .0
         .iter()
@@ -1755,9 +1757,13 @@ pub fn prepare_lights(
             directional_lights: gpu_directional_lights,
             ambient_color: Vec4::from_slice(&LinearRgba::from(ambient_light.color).to_f32_array())
                 * ambient_light.brightness,
+            // Fragments of a main pass with a resolution override cover only
+            // its region (poltronaut: matter-engine spec 064 D2).
             cluster_factors: Vec4::new(
-                clusters.dimensions.x as f32 / extracted_view.viewport.z as f32,
-                clusters.dimensions.y as f32 / extracted_view.viewport.w as f32,
+                clusters.dimensions.x as f32
+                    / resolution_override.map_or(extracted_view.viewport.z, |r| r.0.x) as f32,
+                clusters.dimensions.y as f32
+                    / resolution_override.map_or(extracted_view.viewport.w, |r| r.0.y) as f32,
                 cluster_factors_zw.x,
                 cluster_factors_zw.y,
             ),
