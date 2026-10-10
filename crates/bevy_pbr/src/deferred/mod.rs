@@ -124,6 +124,8 @@ pub fn deferred_lighting(
         &ViewTarget,
         &DeferredLightingIdDepthTexture,
         &DeferredLightingPipeline,
+        &ExtractedCamera,
+        Option<&bevy_camera::MainPassResolutionOverride>,
     )>,
     pipeline_cache: Res<PipelineCache>,
     deferred_lighting_layout: Res<DeferredLightingLayout>,
@@ -135,6 +137,8 @@ pub fn deferred_lighting(
         target,
         deferred_lighting_id_depth_texture,
         deferred_lighting_pipeline,
+        camera,
+        resolution_override,
     ) = view.into_inner();
 
     let Some(pipeline) = pipeline_cache.get_render_pipeline(deferred_lighting_pipeline.pipeline_id)
@@ -170,6 +174,13 @@ pub fn deferred_lighting(
     });
 
     render_pass.set_render_pipeline(pipeline);
+    // Light only the main pass's region when it has a resolution override
+    // (poltronaut: matter-engine spec 064 D2), as the main passes draw.
+    if let Some(viewport) =
+        bevy_camera::Viewport::from_viewport_and_override(camera.viewport.as_ref(), resolution_override)
+    {
+        render_pass.set_camera_viewport(&viewport);
+    }
 
     render_pass.set_bind_group(
         0,
