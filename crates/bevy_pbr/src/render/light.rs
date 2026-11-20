@@ -462,7 +462,12 @@ pub fn extract_lights(
     {
         if !view_visibility.get() {
             if let Ok(mut entity_commands) = commands.get_entity(render_entity) {
-                entity_commands.remove::<ExtractedPointLight>();
+                // Remove the shadow views along with the extracted light.
+                // `prepare_lights` only despawns them for a light it still
+                // sees, so a light that left every view while it cast shadows
+                // would keep rendering its shadow maps until it came back.
+                entity_commands
+                    .remove::<(ExtractedPointLight, PointAndSpotLightViewEntities)>();
             }
             continue;
         }
@@ -576,7 +581,12 @@ pub fn extract_lights(
     {
         if !view_visibility.get() {
             if let Ok(mut entity_commands) = commands.get_entity(render_entity) {
-                entity_commands.remove::<ExtractedPointLight>();
+                // Remove the shadow views along with the extracted light.
+                // `prepare_lights` only despawns them for a light it still
+                // sees, so a light that left every view while it cast shadows
+                // would keep rendering its shadow maps until it came back.
+                entity_commands
+                    .remove::<(ExtractedPointLight, PointAndSpotLightViewEntities)>();
             }
             continue;
         }
