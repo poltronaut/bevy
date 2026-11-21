@@ -430,14 +430,13 @@ fn set_shadow_views_suppressed(commands: &mut Commands, views: &[Entity], suppre
 /// if the light's map is kept (nothing else to do for it this frame), or
 /// whether its map moved if it is rendered.
 ///
-/// `layers` is `(texture, first layer, layer count, map size)`, for a
-/// verification to read back.
+/// `layers` is what a verification reads back.
 pub(crate) fn apply_shadow_map_retention(
     commands: &mut Commands,
     views: &[Entity],
     retention: ShadowMapRetention,
     verification: &mut RetainedShadowMapVerification,
-    layers: (&Texture, u32, u32, u32),
+    layers: VerifyLayers,
 ) -> Option<bool> {
     match retention {
         // Keep the map: no views run, no phases are prepared, and the light is
@@ -459,8 +458,7 @@ pub(crate) fn apply_shadow_map_retention(
             if resume {
                 set_shadow_views_suppressed(commands, views, false);
             }
-            let (texture, base_layer, layer_count, size) = layers;
-            verification.request(texture, base_layer, layer_count, size);
+            verification.request(layers);
             Some(false)
         }
     }
@@ -545,12 +543,27 @@ pub struct ShadowMapVerificationStats {
     pub max_depth_delta: f32,
 }
 
+/// The layers of a kept map that a verification reads back.
+pub(crate) struct VerifyLayers<'a> {
+    /// The depth texture array the map is in.
+    pub texture: &'a Texture,
+    /// The first layer of the map.
+    pub base_layer: u32,
+    /// How many layers: 6 for a point light, 1 for a spot light.
+    pub layers: u32,
+    /// The width and height of a layer.
+    pub size: u32,
+    /// The light, for the log.
+    pub light: MainEntity,
+}
+
 #[derive(Debug, Clone)]
 struct VerifyRequest {
     texture: Texture,
     base_layer: u32,
     layers: u32,
     size: u32,
+    light: MainEntity,
     kept: Option<Buffer>,
 }
 
@@ -571,12 +584,13 @@ impl RetainedShadowMapVerification {
 
     /// Asks for the layers of a kept map to be copied before this frame's shadow
     /// pass and compared with the fresh render after it.
-    pub(crate) fn request(&mut self, texture: &Texture, base_layer: u32, layers: u32, size: u32) {
+    pub(crate) fn request(&mut self, target: VerifyLayers) {
         self.requests.push(VerifyRequest {
-            texture: texture.clone(),
-            base_layer,
-            layers,
-            size,
+            texture: target.texture.clone(),
+            base_layer: target.base_layer,
+            layers: target.layers,
+            size: target.size,
+            light: target.light,
             kept: None,
         });
     }
@@ -691,6 +705,18 @@ pub(crate) fn compare_verified_shadow_layers(
         let (kept, fresh) = (read_buffer(&device, kept), read_buffer(&device, fresh));
         let bytes_per_row = RenderDevice::align_copy_bytes_per_row(request.size as usize * 4);
         let result = compare_depth_layers(&kept, &fresh, request.size as usize, bytes_per_row);
+        if result.layers_differing > 0 {
+            warn!(
+                "a kept shadow map differs from a fresh render: light {:?}, layers {}..{} of {}, {} differ, {} texels, largest depth delta {:e}",
+                request.light,
+                request.base_layer,
+                request.base_layer + request.layers,
+                request.size,
+                result.layers_differing,
+                result.texels_differing,
+                result.max_depth_delta
+            );
+        }
         let stats = &mut verification.stats;
         stats.maps_checked += 1;
         stats.layers_compared += request.layers as u64;

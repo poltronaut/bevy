@@ -1,6 +1,6 @@
 use super::shadow_retention::{
     apply_shadow_map_retention, LightShadowInfo, RetainedShadowMapVerification, RetainedShadowMaps,
-    ShadowMapSlots, SHADOW_SLOT_SHIFT,
+    ShadowMapSlots, VerifyLayers, SHADOW_SLOT_SHIFT,
 };
 use crate::*;
 use alloc::sync::Arc;
@@ -1649,12 +1649,13 @@ pub fn prepare_lights(
             &point_and_spot_light_view_entities.0,
             retention,
             &mut verification,
-            (
-                &point_light_depth_texture.texture,
+            VerifyLayers {
+                texture: &point_light_depth_texture.texture,
                 base_layer,
-                6,
-                point_light_depth_texture.texture.width(),
-            ),
+                layers: 6,
+                size: point_light_depth_texture.texture.width(),
+                light: *light_main_entity,
+            },
         ) else {
             continue;
         };
@@ -1764,12 +1765,13 @@ pub fn prepare_lights(
             &point_and_spot_light_view_entities.0,
             retention,
             &mut verification,
-            (
-                &directional_light_depth_texture.texture,
+            VerifyLayers {
+                texture: &directional_light_depth_texture.texture,
                 base_layer,
-                1,
-                directional_light_depth_texture.texture.width(),
-            ),
+                layers: 1,
+                size: directional_light_depth_texture.texture.width(),
+                light: *light_main_entity,
+            },
         ) else {
             continue;
         };
