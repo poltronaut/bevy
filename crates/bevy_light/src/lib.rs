@@ -63,6 +63,8 @@ pub use directional_light::{
 };
 mod rect_light;
 pub use rect_light::RectLight;
+mod retain_shadow_map;
+pub use retain_shadow_map::RetainShadowMap;
 /// Provides gizmo drawing for visualizing light positions.
 #[cfg(feature = "bevy_gizmos")]
 pub mod gizmos;
