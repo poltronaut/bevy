@@ -345,6 +345,13 @@ impl Plugin for MaterialsPlugin {
                             .in_set(RenderSystems::Specialize)
                             .after(prepare_lights),
                         queue_shadows.in_set(RenderSystems::QueueMeshes),
+                        settle_retained_shadow_maps
+                            .in_set(RenderSystems::Queue)
+                            .after(queue_shadows),
+                        snapshot_kept_shadow_layers
+                            .in_set(RenderSystems::PrepareResources)
+                            .after(prepare_lights),
+                        compare_verified_shadow_layers.in_set(RenderSystems::Cleanup),
                     ),
                 );
         }

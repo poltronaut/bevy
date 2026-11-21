@@ -411,6 +411,10 @@ impl Plugin for PbrPlugin {
             .init_gpu_resource::<LightMeta>()
             .init_gpu_resource::<RenderMaterialBindings>()
             .init_resource::<RenderShadowLodOrigin>()
+            .init_resource::<RetainedShadowMaps>()
+            .init_resource::<ShadowMapSlots>()
+            .init_resource::<RetainedShadowMapVerification>()
+            .init_resource::<bevy_light::ShadowMapCapacity>()
             .allow_ambiguous_resource::<RenderMaterialBindings>();
 
         render_app.world_mut().add_observer(add_light_view_entities);

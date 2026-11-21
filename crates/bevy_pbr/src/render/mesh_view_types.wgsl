@@ -24,6 +24,11 @@ const POINT_LIGHT_FLAGS_AFFECTS_LIGHTMAPPED_MESH_DIFFUSE_BIT: u32   = 1u << 3u;
 const POINT_LIGHT_FLAGS_CONTACT_SHADOWS_ENABLED_BIT: u32            = 1u << 4u;
 const POINT_LIGHT_FLAGS_SPOT_LIGHT_BIT: u32                         = 1u << 5u;
 
+// The bits of `flags` from this one up hold the light's shadow slot: its cube in the
+// point light shadow map array, or its layer after the cascades in the directional
+// light shadow map array. Must match `SHADOW_SLOT_SHIFT` in `shadow_retention.rs`.
+const POINT_LIGHT_SHADOW_SLOT_SHIFT: u32                            = 16u;
+
 struct DirectionalCascade {
     clip_from_world: mat4x4<f32>,
     texel_size: f32,
