@@ -400,11 +400,11 @@ impl RetainedShadowMaps {
     /// completely. A map is kept from the next frame on once it was.
     pub(crate) fn settle(&mut self, mut is_settled: impl FnMut(MainEntity, u32) -> bool) {
         for state in self.lights.values_mut() {
-            if let Some(kept) = state.kept.as_mut() {
-                if kept.to_settle {
-                    kept.to_settle = false;
-                    kept.settled = is_settled(kept.main_entity, kept.view_count);
-                }
+            if let Some(kept) = state.kept.as_mut()
+                && kept.to_settle
+            {
+                kept.to_settle = false;
+                kept.settled = is_settled(kept.main_entity, kept.view_count);
             }
         }
     }
@@ -575,7 +575,7 @@ impl RetainedShadowMapVerification {
             return 0;
         }
         self.frame = self.frame.wrapping_add(1);
-        if self.frame % self.interval.max(1) == 0 {
+        if self.frame.is_multiple_of(self.interval.max(1)) {
             self.lights_per_check
         } else {
             0
