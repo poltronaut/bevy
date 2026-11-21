@@ -64,7 +64,7 @@ pub use directional_light::{
 mod rect_light;
 pub use rect_light::RectLight;
 mod retain_shadow_map;
-pub use retain_shadow_map::RetainShadowMap;
+pub use retain_shadow_map::{RetainShadowMap, ShadowMapCapacity};
 /// Provides gizmo drawing for visualizing light positions.
 #[cfg(feature = "bevy_gizmos")]
 pub mod gizmos;
@@ -169,6 +169,7 @@ impl Plugin for LightPlugin {
         app.init_resource::<GlobalAmbientLight>()
             .init_resource::<DirectionalLightShadowMap>()
             .init_resource::<PointLightShadowMap>()
+            .init_resource::<ShadowMapCapacity>()
             .init_asset::<ScatteringMedium>()
             .register_required_components::<Camera3d, Clusters>()
             .configure_sets(

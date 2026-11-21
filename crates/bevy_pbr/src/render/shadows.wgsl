@@ -1,7 +1,7 @@
 #define_import_path bevy_pbr::shadows
 
 #import bevy_pbr::{
-    mesh_view_types::POINT_LIGHT_FLAGS_SPOT_LIGHT_Y_NEGATIVE,
+    mesh_view_types::{POINT_LIGHT_FLAGS_SPOT_LIGHT_Y_NEGATIVE, POINT_LIGHT_SHADOW_SLOT_SHIFT},
     mesh_view_bindings as view_bindings,
     shadow_sampling::{
         SPOT_SHADOW_TEXEL_SIZE, sample_shadow_cubemap, sample_shadow_cubemap_pcss,
@@ -23,6 +23,8 @@ fn fetch_point_shadow(
     frag_coord_xy: vec2<f32>,
 ) -> f32 {
     let light = &view_bindings::clustered_lights.data[light_id];
+    // The light's cube in the shadow map array: not its place in the light list.
+    let shadow_slot = (*light).flags >> POINT_LIGHT_SHADOW_SLOT_SHIFT;
 
     // because the shadow maps align with the axes and the frustum planes are at 45 degrees
     // we can get the worldspace depth by taking the largest absolute axis
@@ -57,7 +59,7 @@ fn fetch_point_shadow(
             frag_ls * flip_z,
             distance_to_light,
             depth,
-            light_id,
+            shadow_slot,
             (*light).soft_shadow_size,
             frag_coord_xy,
         );
@@ -65,7 +67,7 @@ fn fetch_point_shadow(
 
     // Do the lookup, using HW PCF and comparison. Cubemaps assume a left-handed
     // coordinate space, so we have to flip the z-axis when sampling.
-    return sample_shadow_cubemap(frag_ls * flip_z, distance_to_light, depth, light_id, frag_coord_xy);
+    return sample_shadow_cubemap(frag_ls * flip_z, distance_to_light, depth, shadow_slot, frag_coord_xy);
 }
 
 fn fetch_spot_shadow(
@@ -112,7 +114,8 @@ fn fetch_spot_shadow(
     let depth = near_z / -projected_position.z;
 
     // If soft shadows are enabled, use the PCSS path.
-    let array_index = i32(light_id) + view_bindings::lights.spot_light_shadowmap_offset;
+    // The light's layer: the first layer after the cascades plus its slot.
+    let array_index = i32((*light).flags >> POINT_LIGHT_SHADOW_SLOT_SHIFT) + view_bindings::lights.spot_light_shadowmap_offset;
     if ((*light).soft_shadow_size > 0.0) {
         return sample_shadow_map_pcss(
             shadow_uv,

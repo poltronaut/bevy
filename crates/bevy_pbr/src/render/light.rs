@@ -1,3 +1,7 @@
+use super::shadow_retention::{
+    apply_shadow_map_retention, LightShadowInfo, RetainedShadowMapVerification, RetainedShadowMaps,
+    ShadowMapSlots, SHADOW_SLOT_SHIFT,
+};
 use crate::*;
 use alloc::sync::Arc;
 use bevy_asset::UntypedAssetId;
@@ -25,8 +29,8 @@ use bevy_light::SunDisk;
 use bevy_light::{
     spot_light_clip_from_view, spot_light_world_from_view, AmbientLight, CascadeShadowConfig,
     Cascades, DirectionalLight, DirectionalLightShadowMap, GlobalAmbientLight, PointLight,
-    PointLightShadowMap, RectLight, RetainShadowMap, ShadowFilteringMethod, SpotLight,
-    VolumetricLight,
+    PointLightShadowMap, RectLight, RetainShadowMap, ShadowFilteringMethod, ShadowMapCapacity,
+    SpotLight, VolumetricLight,
 };
 use bevy_log::warn_once;
 use bevy_material::{
@@ -95,9 +99,10 @@ pub struct ExtractedPointLight {
     pub soft_shadows_enabled: bool,
     /// whether this point light contributes diffuse light to lightmapped meshes
     pub affects_lightmapped_mesh_diffuse: bool,
-    /// Whether the main world light has a [`RetainShadowMap`], asking
-    /// `prepare_lights` to keep this light's shadow map between frames.
-    pub retain_shadow_map: bool,
+    /// The [`generation`](RetainShadowMap::generation) of the main world light's
+    /// [`RetainShadowMap`], if it has one, asking `prepare_lights` to keep this
+    /// light's shadow map between frames.
+    pub retain_shadow_map: Option<u32>,
 }
 
 #[derive(Component, Debug)]
@@ -324,6 +329,7 @@ pub fn extract_lights(
     mut commands: Commands,
     point_light_shadow_map: Extract<Res<PointLightShadowMap>>,
     directional_light_shadow_map: Extract<Res<DirectionalLightShadowMap>>,
+    shadow_map_capacity: Extract<Res<ShadowMapCapacity>>,
     point_lights: Extract<
         Query<
             (
@@ -336,7 +342,7 @@ pub fn extract_lights(
                 &CubemapFrusta,
                 Option<&RenderLayers>,
                 Option<&VolumetricLight>,
-                Has<RetainShadowMap>,
+                Option<&RetainShadowMap>,
             ),
             Or<(
                 Changed<PointLight>,
@@ -346,7 +352,7 @@ pub fn extract_lights(
                 Changed<RenderLayers>,
                 Changed<CubemapFrusta>,
                 Changed<VolumetricLight>,
-                Added<RetainShadowMap>,
+                Changed<RetainShadowMap>,
             )>,
         >,
     >,
@@ -362,7 +368,7 @@ pub fn extract_lights(
                 &Frustum,
                 Option<&RenderLayers>,
                 Option<&VolumetricLight>,
-                Has<RetainShadowMap>,
+                Option<&RetainShadowMap>,
             ),
             Or<(
                 Changed<SpotLight>,
@@ -372,7 +378,7 @@ pub fn extract_lights(
                 Changed<RenderLayers>,
                 Changed<Frustum>,
                 Changed<VolumetricLight>,
-                Added<RetainShadowMap>,
+                Changed<RetainShadowMap>,
             )>,
         >,
     >,
@@ -440,9 +446,9 @@ pub fn extract_lights(
     let mapper = &visibility_extraction_system_param.mapper;
 
     // A removed `RetainShadowMap` doesn't make its light `Changed`, so clear
-    // the flag on the already extracted light. This is queued before the
+    // the request on the already extracted light. This is queued before the
     // lights below are extracted, so a light that lost and regained the
-    // component this frame keeps the flag.
+    // component this frame keeps it.
     for main_entity in removed_retain_shadow_maps.read() {
         let Ok(render_entity) = mapper.get(main_entity) else {
             continue;
@@ -450,7 +456,7 @@ pub fn extract_lights(
         if let Ok(mut entity_commands) = commands.get_entity(**render_entity) {
             entity_commands.queue(|mut entity: EntityWorldMut| {
                 if let Some(mut light) = entity.get_mut::<ExtractedPointLight>() {
-                    light.retain_shadow_map = false;
+                    light.retain_shadow_map = None;
                 }
             });
         }
@@ -463,6 +469,9 @@ pub fn extract_lights(
     }
     if directional_light_shadow_map.is_changed() {
         commands.insert_resource(directional_light_shadow_map.clone());
+    }
+    if shadow_map_capacity.is_changed() {
+        commands.insert_resource(**shadow_map_capacity);
     }
 
     // This is the point light shadow map texel size for one face of the cube as a distance of 1.0
@@ -580,7 +589,7 @@ pub fn extract_lights(
             spot_light_angles: None,
             volumetric: volumetric_light.is_some(),
             affects_lightmapped_mesh_diffuse: point_light.affects_lightmapped_mesh_diffuse,
-            retain_shadow_map,
+            retain_shadow_map: retain_shadow_map.map(|retain| retain.generation),
             #[cfg(feature = "experimental_pbr_pcss")]
             soft_shadows_enabled: point_light.soft_shadows_enabled,
             #[cfg(not(feature = "experimental_pbr_pcss"))]
@@ -715,7 +724,7 @@ pub fn extract_lights(
             spot_light_angles: Some((inner_angle, outer_angle)),
             volumetric: volumetric_light.is_some(),
             affects_lightmapped_mesh_diffuse: spot_light.affects_lightmapped_mesh_diffuse,
-            retain_shadow_map,
+            retain_shadow_map: retain_shadow_map.map(|retain| retain.generation),
             #[cfg(feature = "experimental_pbr_pcss")]
             soft_shadows_enabled: spot_light.soft_shadows_enabled,
             #[cfg(not(feature = "experimental_pbr_pcss"))]
@@ -1042,170 +1051,6 @@ pub enum LightEntity {
     },
 }
 
-/// What a point or spot light's shadow map was rendered with.
-///
-/// A shadow map kept by [`RetainShadowMap`] is only still valid while all of
-/// this is unchanged. Casters are not part of it: the renderer can't see them
-/// change, so a game that moves a caster in range removes [`RetainShadowMap`]
-/// to have the map rendered again.
-#[derive(Clone, PartialEq)]
-struct RetainedShadowMapKey {
-    /// The depth texture array the map lives in. A different texture (the
-    /// number of shadowed lights changed) means the contents are gone.
-    texture: TextureId,
-    /// The first layer of the light's map in that texture. Layers follow the
-    /// light's index in the sorted light list, so they move when other
-    /// shadowed lights come and go.
-    base_layer: u32,
-    transform: GlobalTransform,
-    range: f32,
-    shadow_map_near_z: f32,
-    spot_light_angles: Option<(f32, f32)>,
-    render_layers: RenderLayers,
-}
-
-struct RetainedShadowMapState {
-    key: RetainedShadowMapKey,
-    /// Whether the light's shadow views are currently taken out of the render
-    /// graph (they have no [`RootNonCameraView`]).
-    suppressed: bool,
-}
-
-/// What [`RetainedShadowMaps::update`] decided for one light this frame.
-enum ShadowMapRetention {
-    /// The shadow map is rendered this frame.
-    Render {
-        /// The light's map moved (another texture or layer) since it was last
-        /// rendered, so its views must be rebuilt.
-        moved: bool,
-        /// The light's views were suppressed and must be put back.
-        resume: bool,
-    },
-    /// The shadow map keeps the contents of the frame it was last rendered in.
-    Retain {
-        /// First frame of retention: the views must be taken out of the
-        /// render graph.
-        start: bool,
-    },
-}
-
-/// The point and spot light shadow maps kept between frames by
-/// [`RetainShadowMap`], and what they were rendered with.
-///
-/// This is render world bookkeeping for [`prepare_lights`]; it is public so a
-/// diagnostics tool can read how many shadow maps were kept last frame.
-#[derive(Resource, Default)]
-pub struct RetainedShadowMaps {
-    lights: EntityHashMap<RetainedShadowMapState>,
-    seen: EntityHashSet,
-    retained_lights: usize,
-}
-
-impl RetainedShadowMaps {
-    /// The number of lights whose shadow map was kept (not rendered) in the
-    /// last frame `prepare_lights` ran.
-    pub fn retained_lights(&self) -> usize {
-        self.retained_lights
-    }
-
-    fn begin_frame(&mut self) {
-        self.seen.clear();
-        self.retained_lights = 0;
-    }
-
-    /// Forgets lights that `prepare_lights` didn't visit this frame (their
-    /// views are despawned with their extracted light).
-    fn end_frame(&mut self) {
-        let seen = &self.seen;
-        self.lights.retain(|entity, _| seen.contains(entity));
-    }
-
-    /// Forgets a light (its shadow views are gone or its map is rendered
-    /// from scratch), returning whether its views were suppressed.
-    fn forget(&mut self, entity: Entity) -> bool {
-        self.seen.insert(entity);
-        self.lights
-            .remove(&entity)
-            .is_some_and(|state| state.suppressed)
-    }
-
-    fn update(
-        &mut self,
-        entity: Entity,
-        light: &ExtractedPointLight,
-        render_layers: &RenderLayers,
-        texture: TextureId,
-        base_layer: u32,
-        has_views: bool,
-    ) -> ShadowMapRetention {
-        if !light.retain_shadow_map || !has_views {
-            let resume = self.forget(entity);
-            return ShadowMapRetention::Render {
-                moved: false,
-                resume,
-            };
-        }
-        self.seen.insert(entity);
-
-        let key = RetainedShadowMapKey {
-            texture,
-            base_layer,
-            transform: light.transform,
-            range: light.range,
-            shadow_map_near_z: light.shadow_map_near_z,
-            spot_light_angles: light.spot_light_angles,
-            render_layers: render_layers.clone(),
-        };
-
-        match self.lights.get_mut(&entity) {
-            Some(state) if state.key == key => {
-                let start = !state.suppressed;
-                state.suppressed = true;
-                self.retained_lights += 1;
-                ShadowMapRetention::Retain { start }
-            }
-            Some(state) => {
-                let moved =
-                    state.key.texture != key.texture || state.key.base_layer != key.base_layer;
-                let resume = state.suppressed;
-                *state = RetainedShadowMapState {
-                    key,
-                    suppressed: false,
-                };
-                ShadowMapRetention::Render { moved, resume }
-            }
-            None => {
-                self.lights.insert(
-                    entity,
-                    RetainedShadowMapState {
-                        key,
-                        suppressed: false,
-                    },
-                );
-                ShadowMapRetention::Render {
-                    moved: false,
-                    resume: false,
-                }
-            }
-        }
-    }
-}
-
-/// Takes a light's shadow views out of the render graph, so they run no
-/// `Core3d` schedule, or puts them back.
-fn set_shadow_views_suppressed(commands: &mut Commands, views: &[Entity], suppressed: bool) {
-    for view in views {
-        let Ok(mut view) = commands.get_entity(*view) else {
-            continue;
-        };
-        if suppressed {
-            view.remove::<RootNonCameraView>();
-        } else {
-            view.insert(RootNonCameraView(Core3d.intern()));
-        }
-    }
-}
-
 pub fn prepare_lights(
     mut commands: Commands,
     mut texture_cache: ResMut<TextureCache>,
@@ -1283,11 +1128,17 @@ pub fn prepare_lights(
         mut light_key_cache,
         mut specialized_shadow_material_pipeline_cache,
         mut retained_shadow_maps,
+        mut shadow_slots,
+        mut verification,
+        shadow_map_capacity,
     ): (
         Query<&ShadowView>,
         ResMut<LightKeyCache>,
         ResMut<SpecializedShadowMaterialPipelineCache>,
         ResMut<RetainedShadowMaps>,
+        ResMut<ShadowMapSlots>,
+        ResMut<RetainedShadowMapVerification>,
+        Res<ShadowMapCapacity>,
     ),
 ) {
     let views_iter = views.iter();
@@ -1452,6 +1303,29 @@ pub fn prepare_lights(
             .reserve(point_light_entities.len());
     }
 
+    // Give every light that gets a shadow map a slot in the shadow map arrays.
+    // The slots are the lights' sorted positions, as they always were, until a
+    // light asks to keep its map (`RetainShadowMap`): then lights keep their
+    // slots while they stay shadowed.
+    {
+        let has_shadow_map = |index: usize, light: &ExtractedPointLight| {
+            light.shadow_maps_enabled
+                && (index < point_light_shadow_maps_count
+                    || (light.spot_light_angles.is_some()
+                        && index - point_light_count < spot_light_shadow_maps_count))
+        };
+        let mut keep = false;
+        shadow_slots.begin_assign();
+        for (index, entity) in point_light_entities.iter().enumerate() {
+            let light = point_lights.get(*entity).unwrap().2;
+            if has_shadow_map(index, light) {
+                keep |= light.retain_shadow_map.is_some();
+                shadow_slots.push(*entity, light.spot_light_angles.is_some());
+            }
+        }
+        shadow_slots.finish_assign(keep);
+    }
+
     global_clusterable_object_meta.gpu_clustered_lights.clear();
 
     for (index, entity) in point_light_entities.iter().enumerate() {
@@ -1489,6 +1363,18 @@ pub fn prepare_lights(
         if light.affects_lightmapped_mesh_diffuse {
             flags |= PointLightFlags::AFFECTS_LIGHTMAPPED_MESH_DIFFUSE;
         }
+
+        // Where the light's shadow map is in its array, for the shader.
+        let shadow_slot = if flags.contains(PointLightFlags::SHADOW_MAPS_ENABLED) {
+            if light.spot_light_angles.is_some() {
+                shadow_slots.spot_slot(*entity)
+            } else {
+                shadow_slots.point_slot(*entity)
+            }
+            .unwrap_or(0)
+        } else {
+            0
+        };
 
         let (light_custom_data, spot_light_tan_angle) = match light.spot_light_angles {
             Some((inner, outer)) => {
@@ -1535,7 +1421,7 @@ pub fn prepare_lights(
                     .xyz()
                     .extend(1.0 / (light.range * light.range)),
                 position_radius: light.transform.translation().extend(light.radius),
-                flags: flags.bits(),
+                flags: flags.bits() | (shadow_slot << SHADOW_SLOT_SHIFT),
                 shadow_depth_bias: light.shadow_depth_bias,
                 shadow_normal_bias: light.shadow_normal_bias,
                 shadow_map_near_z: light.shadow_map_near_z,
@@ -1602,6 +1488,19 @@ pub fn prepare_lights(
 
     live_shadow_mapping_lights.clear();
     retained_shadow_maps.begin_frame();
+    let mut verify_budget = verification.begin_frame();
+    let shadow_map_usage = if verification.enabled {
+        TextureUsages::RENDER_ATTACHMENT | TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_SRC
+    } else {
+        TextureUsages::RENDER_ATTACHMENT | TextureUsages::TEXTURE_BINDING
+    };
+    let point_light_slot_count = shadow_slots
+        .points
+        .slot_count(shadow_map_capacity.point_lights, max_texture_cubes);
+    let spot_light_slot_count = shadow_slots.spots.slot_count(
+        shadow_map_capacity.spot_lights,
+        max_texture_array_layers.saturating_sub(num_directional_cascades_enabled),
+    );
 
     let mut point_light_depth_attachments = HashMap::<u32, DepthAttachment>::default();
     let mut directional_light_depth_attachments = HashMap::<u32, DepthAttachment>::default();
@@ -1612,14 +1511,14 @@ pub fn prepare_lights(
             size: Extent3d {
                 width: point_light_shadow_map.size as u32,
                 height: point_light_shadow_map.size as u32,
-                depth_or_array_layers: point_light_shadow_maps_count.max(1) as u32 * 6,
+                depth_or_array_layers: point_light_slot_count.max(1) as u32 * 6,
             },
             mip_level_count: 1,
             sample_count: 1,
             dimension: TextureDimension::D2,
             format: CORE_3D_DEPTH_FORMAT,
             label: Some("point_light_shadow_map_texture"),
-            usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::TEXTURE_BINDING,
+            usage: shadow_map_usage,
             view_formats: &[],
         },
     );
@@ -1662,8 +1561,7 @@ pub fn prepare_lights(
                     .min(render_device.limits().max_texture_dimension_2d),
                 height: (directional_light_shadow_map.size as u32)
                     .min(render_device.limits().max_texture_dimension_2d),
-                depth_or_array_layers: (num_directional_cascades_enabled
-                    + spot_light_shadow_maps_count)
+                depth_or_array_layers: (num_directional_cascades_enabled + spot_light_slot_count)
                     .max(1) as u32,
             },
             mip_level_count: 1,
@@ -1671,7 +1569,7 @@ pub fn prepare_lights(
             dimension: TextureDimension::D2,
             format: CORE_3D_DEPTH_FORMAT,
             label: Some("directional_light_shadow_map_texture"),
-            usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::TEXTURE_BINDING,
+            usage: shadow_map_usage,
             view_formats: &[],
         },
     );
@@ -1724,42 +1622,41 @@ pub fn prepare_lights(
             continue;
         }
 
+        let Some(slot) = shadow_slots.point_slot(*light_entity) else {
+            retained_shadow_maps.forget(*light_entity);
+            despawn_entities(
+                &mut commands,
+                mem::take(&mut point_and_spot_light_view_entities.0),
+            );
+            continue;
+        };
+        let base_layer = slot * 6;
         let retention = retained_shadow_maps.update(
-            *light_entity,
-            light,
-            light_render_layers,
-            point_light_depth_texture.texture.id(),
-            (*global_clusterable_object_meta
-                .entity_to_index
-                .get(light_entity)
-                .unwrap()
-                * 6) as u32,
-            !point_and_spot_light_view_entities.0.is_empty(),
+            &LightShadowInfo {
+                entity: *light_entity,
+                main_entity: *light_main_entity,
+                light,
+                render_layers: light_render_layers,
+                texture: point_light_depth_texture.texture.id(),
+                base_layer,
+                view_count: 6,
+                has_views: !point_and_spot_light_view_entities.0.is_empty(),
+            },
+            &mut verify_budget,
         );
-        let moved = match retention {
-            ShadowMapRetention::Retain { start } => {
-                // Keep the map: no views run, no phases are prepared, and the
-                // light is left out of `live_shadow_mapping_lights` so its
-                // phases and caches are dropped until it renders again.
-                if start {
-                    set_shadow_views_suppressed(
-                        &mut commands,
-                        &point_and_spot_light_view_entities.0,
-                        true,
-                    );
-                }
-                continue;
-            }
-            ShadowMapRetention::Render { moved, resume } => {
-                if resume {
-                    set_shadow_views_suppressed(
-                        &mut commands,
-                        &point_and_spot_light_view_entities.0,
-                        false,
-                    );
-                }
-                moved
-            }
+        let Some(moved) = apply_shadow_map_retention(
+            &mut commands,
+            &point_and_spot_light_view_entities.0,
+            retention,
+            &mut verification,
+            (
+                &point_light_depth_texture.texture,
+                base_layer,
+                6,
+                point_light_depth_texture.texture.width(),
+            ),
+        ) else {
+            continue;
         };
 
         if point_and_spot_light_view_entities.0.is_empty() {
@@ -1769,7 +1666,7 @@ pub fn prepare_lights(
             create_point_shadow_maps(
                 &mut commands,
                 &mut point_light_depth_attachments,
-                &global_clusterable_object_meta,
+                slot as usize,
                 (
                     &cube_face_rotations,
                     point_light_frusta,
@@ -1787,7 +1684,7 @@ pub fn prepare_lights(
             create_point_shadow_maps(
                 &mut commands,
                 &mut point_light_depth_attachments,
-                &global_clusterable_object_meta,
+                slot as usize,
                 (
                     &cube_face_rotations,
                     point_light_frusta,
@@ -1814,11 +1711,10 @@ pub fn prepare_lights(
     }
 
     // spot lights
-    for (light_index, light_entity) in point_light_entities
+    for light_entity in point_light_entities
         .iter()
         .skip(point_light_count)
         .take(spot_light_count)
-        .enumerate()
     {
         let (
             _,
@@ -1838,35 +1734,44 @@ pub fn prepare_lights(
             continue;
         }
 
+        let Some(light_index) = shadow_slots
+            .spot_slot(*light_entity)
+            .map(|slot| slot as usize)
+        else {
+            retained_shadow_maps.forget(*light_entity);
+            despawn_entities(
+                &mut commands,
+                mem::take(&mut point_and_spot_light_view_entities.0),
+            );
+            continue;
+        };
+        let base_layer = (num_directional_cascades_enabled + light_index) as u32;
         let retention = retained_shadow_maps.update(
-            *light_entity,
-            light,
-            light_render_layers,
-            directional_light_depth_texture.texture.id(),
-            (num_directional_cascades_enabled + light_index) as u32,
-            !point_and_spot_light_view_entities.0.is_empty(),
+            &LightShadowInfo {
+                entity: *light_entity,
+                main_entity: *light_main_entity,
+                light,
+                render_layers: light_render_layers,
+                texture: directional_light_depth_texture.texture.id(),
+                base_layer,
+                view_count: 1,
+                has_views: !point_and_spot_light_view_entities.0.is_empty(),
+            },
+            &mut verify_budget,
         );
-        let moved = match retention {
-            ShadowMapRetention::Retain { start } => {
-                if start {
-                    set_shadow_views_suppressed(
-                        &mut commands,
-                        &point_and_spot_light_view_entities.0,
-                        true,
-                    );
-                }
-                continue;
-            }
-            ShadowMapRetention::Render { moved, resume } => {
-                if resume {
-                    set_shadow_views_suppressed(
-                        &mut commands,
-                        &point_and_spot_light_view_entities.0,
-                        false,
-                    );
-                }
-                moved
-            }
+        let Some(moved) = apply_shadow_map_retention(
+            &mut commands,
+            &point_and_spot_light_view_entities.0,
+            retention,
+            &mut verification,
+            (
+                &directional_light_depth_texture.texture,
+                base_layer,
+                1,
+                directional_light_depth_texture.texture.width(),
+            ),
+        ) else {
+            continue;
         };
 
         // Spot light shadow maps are shared across all cameras,
@@ -2051,10 +1956,9 @@ pub fn prepare_lights(
             cluster_dimensions: clusters.dimensions.extend(n_clusters),
             n_directional_lights: num_directional_lights_for_this_view as u32,
             // spotlight shadow maps are stored in the directional light array, starting at num_directional_cascades_enabled.
-            // the spot lights themselves start in the light array at point_light_count. so to go from light
-            // index to shadow map index, we need to subtract point light count and add directional shadowmap count.
-            spot_light_shadowmap_offset: num_directional_cascades_enabled as i32
-                - point_light_count as i32,
+            // a spot light's shadow map index is that plus the shadow slot it was given, which the shader reads
+            // from the light's flags.
+            spot_light_shadowmap_offset: num_directional_cascades_enabled as i32,
             ambient_light_affects_lightmapped_meshes: ambient_light.affects_lightmapped_meshes
                 as u32,
             n_rect_lights: 0,
@@ -2324,7 +2228,7 @@ pub fn prepare_lights(
 fn create_point_shadow_maps(
     commands: &mut Commands,
     point_light_depth_attachments: &mut HashMap<u32, DepthAttachment>,
-    global_clusterable_object_meta: &ResMut<GlobalClusterableObjectMeta>,
+    light_index: usize,
     (cube_face_rotations, point_light_frusta, light_view_entities): (
         &Vec<Transform>,
         Option<&CubemapFrusta>,
@@ -2340,10 +2244,6 @@ fn create_point_shadow_maps(
     point_light_shadow_map_size: u32,
     gpu_preprocessing_support_max_supported_mode: GpuPreprocessingMode,
 ) {
-    let light_index = *global_clusterable_object_meta
-        .entity_to_index
-        .get(light_entity)
-        .unwrap();
     // ignore scale because we don't want to effectively scale light radius and range
     // by applying those as a view transform to shadow map rendering of objects
     // and ignore rotation because we want the shadow map projections to align with the axes
@@ -3278,224 +3178,5 @@ pub fn extract_shadow_lod_origin(
             render_shadow_lod_origin.0 = global_transform.translation();
         }
         None => render_shadow_lod_origin.0 = Default::default(),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn light(retain_shadow_map: bool) -> ExtractedPointLight {
-        ExtractedPointLight {
-            color: LinearRgba::WHITE,
-            intensity: 1.0,
-            range: 10.0,
-            radius: 0.0,
-            transform: GlobalTransform::from_xyz(1.0, 2.0, 3.0),
-            shadow_maps_enabled: true,
-            contact_shadows_enabled: false,
-            shadow_depth_bias: 0.0,
-            shadow_normal_bias: 0.0,
-            shadow_map_near_z: 0.1,
-            spot_light_angles: None,
-            volumetric: false,
-            soft_shadows_enabled: false,
-            affects_lightmapped_mesh_diffuse: true,
-            retain_shadow_map,
-        }
-    }
-
-    /// One frame for one light: what `prepare_lights` does with it.
-    fn frame(
-        maps: &mut RetainedShadowMaps,
-        entity: Entity,
-        light: &ExtractedPointLight,
-        texture: TextureId,
-        base_layer: u32,
-    ) -> ShadowMapRetention {
-        maps.begin_frame();
-        let retention = maps.update(
-            entity,
-            light,
-            &RenderLayers::default(),
-            texture,
-            base_layer,
-            true,
-        );
-        maps.end_frame();
-        retention
-    }
-
-    fn is_render(retention: &ShadowMapRetention) -> bool {
-        matches!(retention, ShadowMapRetention::Render { .. })
-    }
-
-    #[test]
-    fn a_marked_light_renders_once_then_keeps_its_map() {
-        let (mut maps, entity, texture) = (
-            RetainedShadowMaps::default(),
-            Entity::from_raw_u32(7).unwrap(),
-            TextureId::new(),
-        );
-        let light = light(true);
-        assert!(
-            is_render(&frame(&mut maps, entity, &light, texture, 0)),
-            "the first frame renders"
-        );
-        assert_eq!(maps.retained_lights(), 0);
-        assert!(matches!(
-            frame(&mut maps, entity, &light, texture, 0),
-            ShadowMapRetention::Retain { start: true }
-        ));
-        assert_eq!(maps.retained_lights(), 1);
-        assert!(matches!(
-            frame(&mut maps, entity, &light, texture, 0),
-            ShadowMapRetention::Retain { start: false }
-        ));
-    }
-
-    #[test]
-    fn an_unmarked_light_renders_every_frame() {
-        let (mut maps, entity, texture) = (
-            RetainedShadowMaps::default(),
-            Entity::from_raw_u32(7).unwrap(),
-            TextureId::new(),
-        );
-        let light = light(false);
-        for _ in 0..3 {
-            assert!(is_render(&frame(&mut maps, entity, &light, texture, 0)));
-        }
-        assert_eq!(maps.retained_lights(), 0);
-    }
-
-    #[test]
-    fn a_light_that_changed_renders_again_and_puts_its_views_back() {
-        let (mut maps, entity, texture) = (
-            RetainedShadowMaps::default(),
-            Entity::from_raw_u32(7).unwrap(),
-            TextureId::new(),
-        );
-        let mut light = light(true);
-        frame(&mut maps, entity, &light, texture, 0);
-        frame(&mut maps, entity, &light, texture, 0);
-        light.transform = GlobalTransform::from_xyz(1.0, 2.5, 3.0);
-        match frame(&mut maps, entity, &light, texture, 0) {
-            ShadowMapRetention::Render { moved, resume } => assert!(
-                (!moved, resume) == (true, true),
-                "same place in the texture, views were suppressed"
-            ),
-            ShadowMapRetention::Retain { .. } => panic!("a moved light must render again"),
-        }
-        assert!(
-            matches!(
-                frame(&mut maps, entity, &light, texture, 0),
-                ShadowMapRetention::Retain { start: true }
-            ),
-            "and is kept again from the new pose"
-        );
-    }
-
-    #[test]
-    fn a_map_that_moved_in_its_texture_is_rendered_again() {
-        let (mut maps, entity) = (
-            RetainedShadowMaps::default(),
-            Entity::from_raw_u32(7).unwrap(),
-        );
-        let (first, second) = (TextureId::new(), TextureId::new());
-        let light = light(true);
-        frame(&mut maps, entity, &light, first, 6);
-        frame(&mut maps, entity, &light, first, 6);
-        // Another shadowed light came before this one: its layer moved.
-        assert!(matches!(
-            frame(&mut maps, entity, &light, first, 12),
-            ShadowMapRetention::Render {
-                moved: true,
-                resume: true
-            }
-        ));
-        frame(&mut maps, entity, &light, first, 12);
-        // The array was reallocated (the number of shadowed lights changed): its contents are gone.
-        assert!(matches!(
-            frame(&mut maps, entity, &light, second, 12),
-            ShadowMapRetention::Render {
-                moved: true,
-                resume: true
-            }
-        ));
-    }
-
-    #[test]
-    fn dropping_the_mark_or_the_shadow_renders_again() {
-        let (mut maps, entity, texture) = (
-            RetainedShadowMaps::default(),
-            Entity::from_raw_u32(7).unwrap(),
-            TextureId::new(),
-        );
-        frame(&mut maps, entity, &light(true), texture, 0);
-        frame(&mut maps, entity, &light(true), texture, 0);
-        assert!(matches!(
-            frame(&mut maps, entity, &light(false), texture, 0),
-            ShadowMapRetention::Render { resume: true, .. }
-        ));
-        // Marked again: it renders first, it isn't trusted from before.
-        assert!(is_render(&frame(
-            &mut maps,
-            entity,
-            &light(true),
-            texture,
-            0
-        )));
-
-        frame(&mut maps, entity, &light(true), texture, 0);
-        maps.begin_frame();
-        assert!(
-            maps.forget(entity),
-            "a light that lost its shadow had its views suppressed"
-        );
-        maps.end_frame();
-        assert!(is_render(&frame(
-            &mut maps,
-            entity,
-            &light(true),
-            texture,
-            0
-        )));
-    }
-
-    #[test]
-    fn a_light_that_left_the_frame_is_forgotten() {
-        let (mut maps, entity, texture) = (
-            RetainedShadowMaps::default(),
-            Entity::from_raw_u32(7).unwrap(),
-            TextureId::new(),
-        );
-        frame(&mut maps, entity, &light(true), texture, 0);
-        frame(&mut maps, entity, &light(true), texture, 0);
-        maps.begin_frame();
-        maps.end_frame();
-        assert!(
-            is_render(&frame(&mut maps, entity, &light(true), texture, 0)),
-            "its views were despawned with it"
-        );
-    }
-
-    #[test]
-    fn a_light_without_views_can_not_be_kept() {
-        let (mut maps, entity, texture) = (
-            RetainedShadowMaps::default(),
-            Entity::from_raw_u32(7).unwrap(),
-            TextureId::new(),
-        );
-        let light = light(true);
-        frame(&mut maps, entity, &light, texture, 0);
-        maps.begin_frame();
-        assert!(is_render(&maps.update(
-            entity,
-            &light,
-            &RenderLayers::default(),
-            texture,
-            0,
-            false
-        )));
     }
 }

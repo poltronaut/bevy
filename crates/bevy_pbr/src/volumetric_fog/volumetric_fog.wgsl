@@ -27,6 +27,7 @@
     DIRECTIONAL_LIGHT_FLAGS_VOLUMETRIC_BIT,
     POINT_LIGHT_FLAGS_SHADOWS_ENABLED_BIT,
     POINT_LIGHT_FLAGS_VOLUMETRIC_BIT,
+    POINT_LIGHT_SHADOW_SLOT_SHIFT,
     POINT_LIGHT_FLAGS_SPOT_LIGHT_Y_NEGATIVE,
 }
 #import bevy_pbr::shadow_sampling::{
@@ -474,7 +475,8 @@ fn fetch_point_shadow_without_normal(light_id: u32, frag_position: vec4<f32>, fr
     // Do the lookup, using HW PCF and comparison. Cubemaps assume a left-handed coordinate space,
     // so we have to flip the z-axis when sampling.
     let flip_z = vec3(1.0, 1.0, -1.0);
-    return sample_shadow_cubemap(frag_ls * flip_z, distance_to_light, depth, light_id, frag_coord_xy);
+    // The light's cube in the shadow map array: not its place in the light list.
+    return sample_shadow_cubemap(frag_ls * flip_z, distance_to_light, depth, (*light).flags >> POINT_LIGHT_SHADOW_SLOT_SHIFT, frag_coord_xy);
 }
 
 fn fetch_spot_shadow_without_normal(light_id: u32, frag_position: vec4<f32>, frag_coord_xy: vec2<f32>) -> f32 {
@@ -516,7 +518,7 @@ fn fetch_spot_shadow_without_normal(light_id: u32, frag_position: vec4<f32>, fra
     return sample_shadow_map(
         shadow_uv,
         depth,
-        i32(light_id) + lights.spot_light_shadowmap_offset,
+        i32((*light).flags >> POINT_LIGHT_SHADOW_SLOT_SHIFT) + lights.spot_light_shadowmap_offset,
         frag_coord_xy,
         SPOT_SHADOW_TEXEL_SIZE
     );
